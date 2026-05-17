@@ -55,7 +55,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/pq-jwt/PQ-JWT-Hybrid.git"
+    "url": "git+https://github.com/pq-jwt/PQ-JWT-Hybrid.git"
   },
   "bugs": {
     "url": "https://github.com/pq-jwt/PQ-JWT-Hybrid/issues"
