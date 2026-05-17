@@ -1,0 +1,67 @@
+{
+  "name": "@pq-jwt/hybrid",
+  "version": "0.0.1",
+  "description": "Hybrid JWT — ECDSA P-256 + ML-DSA dual signing. Migration bridge from classical to post-quantum authentication.",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "module": "./src/index.mjs",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs",
+      "default": "./src/index.mjs"
+    }
+  },
+  "types": "./src/index.d.ts",
+  "files": [
+    "src/index.mjs",
+    "src/index.d.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node test/test.mjs",
+    "test:ecosystem": "node test/ecosystem/run.mjs"
+  },
+  "keywords": [
+    "jwt",
+    "post-quantum",
+    "hybrid",
+    "ml-dsa",
+    "ecdsa",
+    "p256",
+    "migration",
+    "cryptography",
+    "nist",
+    "fips-204",
+    "authentication",
+    "pqc",
+    "dilithium"
+  ],
+  "author": {
+    "name": "Sachin Ruhil",
+    "email": "sachinruhil11@gmail.com",
+    "url": "https://github.com/ruhil6789"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^1.7.2",
+    "@noble/post-quantum": "^0.6.1"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pq-jwt/PQ-JWT-Hybrid.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pq-jwt/PQ-JWT-Hybrid/issues"
+  },
+  "homepage": "https://pq-jwt.github.io",
+  "publishConfig": {
+    "access": "public"
+  }
+}
