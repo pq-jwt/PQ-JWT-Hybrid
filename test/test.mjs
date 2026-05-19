@@ -168,7 +168,7 @@ console.log('\n── verifyHybrid() ──────────────�
 test('returns correct header (HYBRID-JWT, alg, ver)', () => {
   const { header } = verifyHybrid(BASE_TOKEN, ecdsa.publicKey, pq.publicKey, { issuer:'test', audience:'api' });
   assert(header.typ === 'HYBRID-JWT', 'typ');
-  assert(header.alg === 'ECDSA-P256+ML-DSA-65', 'alg');
+  assert(header.alg === 'ML-DSA-65-ES256', 'alg');
   assert(header.ver === '1', 'ver');
 });
 test('returns correct payload', () => {
@@ -281,7 +281,7 @@ console.log('\n── decode() ────────────────�
 test('decode returns all fields', () => {
   const d = decode(BASE_TOKEN);
   assert(d.header.typ === 'HYBRID-JWT', 'typ');
-  assert(d.header.alg === 'ECDSA-P256+ML-DSA-65', 'alg');
+  assert(d.header.alg === 'ML-DSA-65-ES256', 'alg');
   assert(d.payload.sub === 'user_42', 'sub');
   assert(d.ecdsaSignature instanceof Uint8Array, 'ecdsa sig type');
   assert(d.ecdsaSignature.length === 64, 'ecdsa sig len');

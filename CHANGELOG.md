@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 — 2026-05-19
+
+### Breaking Changes
+
+- **IETF Standard Alignment**: Renamed classical algorithm keys (e.g., `P-256` to `ES256`) and flipped the order in the header construction to follow the draft-prabel-jose-pq-composite-sigs-05 standard. The algorithm header is now `<pqAlg>-<classicalAlg>`, for example, `ML-DSA-65-ES256` instead of `ECDSA-P256+ML-DSA-65`. Tokens generated with v1.0.x are no longer compatible with v1.2.0 verifiers.
+
 ## 0.0.1 — 2025-05-17
 
 ### Initial Release

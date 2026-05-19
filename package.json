@@ -1,6 +1,6 @@
 {
   "name": "@pq-jwt/hybrid",
-  "version": "0.0.1",
+  "version": "1.2.0",
   "description": "Hybrid JWT — ECDSA P-256 + ML-DSA dual signing. Migration bridge from classical to post-quantum authentication.",
   "type": "module",
   "main": "./src/index.mjs",

@@ -22,7 +22,7 @@ Token format: `base64url(header) . base64url(payload) . base64url({e: ecdsa_sig,
 
 The header is:
 ```json
-{ "alg": "ECDSA-P256+ML-DSA-65", "typ": "HYBRID-JWT", "ver": "1" }
+{ "alg": "ML-DSA-65-ES256", "typ": "HYBRID-JWT", "ver": "1" }
 ```
 
 ---

@@ -57,7 +57,7 @@ export interface HybridVerifyOptions {
 }
 
 export interface HybridTokenHeader {
-  /** e.g. 'ECDSA-P256+ML-DSA-65' */
+  /** e.g. 'ML-DSA-65-ES256' */
   alg: string;
   typ: 'HYBRID-JWT';
   ver: '1';

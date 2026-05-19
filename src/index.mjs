@@ -17,7 +17,7 @@
  *   }))
  *
  * Header:
- *   { alg: "ECDSA-P256+ML-DSA-65", typ: "HYBRID-JWT", ver: "1" }
+ *   { alg: "ML-DSA-65-ES256", typ: "HYBRID-JWT", ver: "1" }
  *
  * Migration phases:
  *   Phase 1 — issue hybrid tokens, verify with verifyHybrid() on all services
@@ -30,6 +30,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { sha512 } from '@noble/hashes/sha2.js';
 import { ml_dsa44, ml_dsa65, ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { slh_dsa_sha2_128s } from '@noble/post-quantum/slh-dsa.js';
+
 
 // ── Algorithm registry ────────────────────────────────────────
 const PQ_ALGORITHMS = {
@@ -218,7 +219,7 @@ export function signHybrid(payload, ecdsaSecretKey, pqSecretKey, options = {}) {
   if (options.jwtId)    claims.jti = options.jwtId;
 
   const header = {
-    alg: `ECDSA-P256+${pqAlgorithm}`,
+    alg: `${pqAlgorithm}-ES256`,
     typ: 'HYBRID-JWT',
     ver: '1',
   };
@@ -393,8 +394,8 @@ function _decodeAndValidateStructure(token) {
   if (header.typ !== 'HYBRID-JWT')
     throw new HybridInvalidTokenError(`expected typ "HYBRID-JWT", got "${header.typ}"`);
 
-  // Parse alg: "ECDSA-P256+ML-DSA-65"
-  const algMatch = (header.alg ?? '').match(/^ECDSA-P256\+(.+)$/);
+  // Parse alg: "ML-DSA-65-ES256"
+  const algMatch = (header.alg ?? '').match(/^(.+)-ES256$/);
   if (!algMatch)
     throw new HybridInvalidTokenError(`unrecognized algorithm "${header.alg}"`);
 
