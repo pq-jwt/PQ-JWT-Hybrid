@@ -1,7 +1,7 @@
 /**
  * @package     @pq-jwt/hybrid
  * @author      Sachin Ruhil <sachinruhil11@gmail.com>
- * @version     0.0.1
+ * @version     0.0.2
  * @license     MIT
  * @description Hybrid JWT — ECDSA P-256 + ML-DSA dual signing. Migration bridge.
  * @copyright   2026 Sachin Ruhil. All rights reserved.

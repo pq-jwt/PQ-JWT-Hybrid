@@ -1,87 +1,79 @@
 /**
  * @package     @pq-jwt/hybrid
  * @author      Sachin Ruhil <sachinruhil11@gmail.com>
- * @version     0.0.1
+ * @version     1.0.0
  * @license     MIT
- * @description Hybrid JWT library — ECDSA P-256 + ML-DSA dual signing.
- *              Migration bridge from classical to post-quantum authentication.
+ * @description Hybrid JWT library — Fully compliant with IETF draft-prabel-jose-pq-composite-sigs-05
  * @copyright   2026 Sachin Ruhil. All rights reserved.
  * @see         https://github.com/pq-jwt/PQ-JWT-Hybrid
  *
- * Token format:
- *   base64url(header) . base64url(payload) . base64url(combined_signature)
- *
- *   combined_signature = base64url(JSON({
- *     e: hex(ecdsa_sig_64_bytes),   // P-256 compact r||s
- *     m: hex(mldsa_sig_bytes),      // ML-DSA signature
- *   }))
- *
- * Header:
- *   { alg: "ML-DSA-65-ES256", typ: "HYBRID-JWT", ver: "1" }
- *
- * Migration phases:
- *   Phase 1 — issue hybrid tokens, verify with verifyHybrid() on all services
- *   Phase 2 — new services verify PQ only (verifyPQ), old still accept ECDSA
- *   Phase 3 — drop ECDSA keys, move to @pq-jwt/core sign() + verify()
+ * This version implements the IETF Composite Algorithm Signatures 2025 standard.
  */
 
-import { p256 } from '@noble/curves/nist.js';
-import { sha256 } from '@noble/hashes/sha2.js';
-import { sha512 } from '@noble/hashes/sha2.js';
+import { p256, p384 } from '@noble/curves/nist.js';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { ed448 } from '@noble/curves/ed448.js';
+import { sha256, sha384, sha512 } from '@noble/hashes/sha2.js';
+import { shake256 } from '@noble/hashes/sha3.js';
+import { randomBytes } from '@noble/hashes/utils.js';
 import { ml_dsa44, ml_dsa65, ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { slh_dsa_sha2_128s } from '@noble/post-quantum/slh-dsa.js';
 
+const PREFIX = Buffer.from('436F6D706F73697465416C676F726974686D5369676E61747572657332303235', 'hex');
 
-// ── Algorithm registry ────────────────────────────────────────
-const PQ_ALGORITHMS = {
-  'ML-DSA-44': { impl: ml_dsa44, skLen: 2560, pkLen: 1312 },
-  'ML-DSA-65': { impl: ml_dsa65, skLen: 4032, pkLen: 1952 },
-  'ML-DSA-87': { impl: ml_dsa87, skLen: 4896, pkLen: 2592 },
-  'SLH-DSA-SHA2-128s': { impl: slh_dsa_sha2_128s, skLen: 64, pkLen: 32 },
+function hashPreHash(hashFn, data) {
+  if (hashFn === shake256) {
+    return hashFn(data, { dkLen: 64 });
+  }
+  return hashFn(data);
+}
+
+const ALGORITHMS = {
+  'ML-DSA-44-ES256': {
+    mldsa: ml_dsa44, trad: p256, tradType: 'ecdsa', hash: sha256,
+    labelHex: '434F4D505349472D4D4C44534134342D45434453412D503235362D534841323536',
+    mldsaPkLen: 1312, mldsaSkLen: 2560, mldsaSigLen: 2420, tradPkLen: 33, tradSkLen: 32
+  },
+  'ML-DSA-65-ES256': {
+    mldsa: ml_dsa65, trad: p256, tradType: 'ecdsa', hash: sha512,
+    labelHex: '434F4D505349472D4D4C44534136352D45434453412D503235362D534841353132',
+    mldsaPkLen: 1952, mldsaSkLen: 4032, mldsaSigLen: 3309, tradPkLen: 33, tradSkLen: 32
+  },
+  'ML-DSA-87-ES384': {
+    mldsa: ml_dsa87, trad: p384, tradType: 'ecdsa', hash: sha512,
+    labelHex: '434F4D505349472D4D4C44534138372D45434453412D503338342D534841353132',
+    mldsaPkLen: 2592, mldsaSkLen: 4896, mldsaSigLen: 4627, tradPkLen: 49, tradSkLen: 48
+  },
+  'ML-DSA-44-Ed25519': {
+    mldsa: ml_dsa44, trad: ed25519, tradType: 'eddsa', hash: sha512,
+    labelHex: '434F4D505349472D4D4C44534134342D456432353531392D534841353132',
+    mldsaPkLen: 1312, mldsaSkLen: 2560, mldsaSigLen: 2420, tradPkLen: 32, tradSkLen: 32
+  },
+  'ML-DSA-65-Ed25519': {
+    mldsa: ml_dsa65, trad: ed25519, tradType: 'eddsa', hash: sha512,
+    labelHex: '434F4D505349472D4D4C44534136352D456432353531392D534841353132',
+    mldsaPkLen: 1952, mldsaSkLen: 4032, mldsaSigLen: 3309, tradPkLen: 32, tradSkLen: 32
+  },
+  'ML-DSA-87-Ed448': {
+    mldsa: ml_dsa87, trad: ed448, tradType: 'eddsa', hash: shake256,
+    labelHex: '434F4D505349472D4D4C44534138372D45643434382D5348414B45323536',
+    mldsaPkLen: 2592, mldsaSkLen: 4896, mldsaSigLen: 4627, tradPkLen: 57, tradSkLen: 57
+  },
 };
 
-export const SUPPORTED_PQ_ALGORITHMS = Object.keys(PQ_ALGORITHMS);
-
-// ECDSA P-256 constants
-const ECDSA_SK_LEN = 32;  // bytes
-const ECDSA_PK_LEN = 33;  // compressed
-const ECDSA_SIG_LEN = 64; // compact r||s
+export const SUPPORTED_ALGORITHMS = Object.keys(ALGORITHMS);
 
 // ── Custom errors ─────────────────────────────────────────────
 export class HybridJWTError extends Error {
-  constructor(message, code) {
-    super(message);
-    this.name = 'HybridJWTError';
-    this.code = code;
-  }
+  constructor(message, code) { super(message); this.name = 'HybridJWTError'; this.code = code; }
 }
 export class HybridTokenExpiredError extends HybridJWTError {
-  constructor(expiredAt) {
-    super(
-      `Token expired at ${new Date(expiredAt * 1000).toISOString()}`,
-      'TOKEN_EXPIRED'
-    );
-    this.name = 'HybridTokenExpiredError';
-    this.expiredAt = expiredAt;
-  }
+  constructor(expiredAt) { super(`Token expired at ${new Date(expiredAt * 1000).toISOString()}`, 'TOKEN_EXPIRED'); this.name = 'HybridTokenExpiredError'; this.expiredAt = expiredAt; }
 }
 export class HybridInvalidTokenError extends HybridJWTError {
-  constructor(reason) {
-    super(`Invalid token: ${reason}`, 'INVALID_TOKEN');
-    this.name = 'HybridInvalidTokenError';
-  }
+  constructor(reason) { super(`Invalid token: ${reason}`, 'INVALID_TOKEN'); this.name = 'HybridInvalidTokenError'; }
 }
 export class HybridSignatureError extends HybridJWTError {
-  constructor(which) {
-    super(
-      which
-        ? `Signature verification failed (${which})`
-        : 'Signature verification failed',
-      'SIGNATURE_INVALID'
-    );
-    this.name = 'HybridSignatureError';
-    this.which = which ?? 'unknown';
-  }
+  constructor(which) { super(which ? `Signature verification failed (${which})` : 'Signature verification failed', 'SIGNATURE_INVALID'); this.name = 'HybridSignatureError'; this.which = which ?? 'unknown'; }
 }
 
 // ── Encoding utilities ─────────────────────────────────────────
@@ -89,62 +81,49 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 function toBase64Url(bytes) {
-  return Buffer.from(bytes)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function fromBase64Url(str) {
   const p = str.replace(/-/g, '+').replace(/_/g, '/');
   const pad = p.length % 4;
   return new Uint8Array(Buffer.from(pad ? p + '='.repeat(4 - pad) : p, 'base64'));
 }
-function encodeJSON(obj) {
-  return toBase64Url(enc.encode(JSON.stringify(obj)));
-}
-function decodeJSON(str) {
-  return JSON.parse(dec.decode(fromBase64Url(str)));
-}
+function encodeJSON(obj) { return toBase64Url(enc.encode(JSON.stringify(obj))); }
+function decodeJSON(str) { return JSON.parse(dec.decode(fromBase64Url(str))); }
 
 // ── Key utilities ─────────────────────────────────────────────
 
-/**
- * Generate a hybrid key pair — both ECDSA P-256 and ML-DSA keys.
- *
- * @param {'ML-DSA-44'|'ML-DSA-65'|'ML-DSA-87'|'SLH-DSA-SHA2-128s'} pqAlgorithm
- * @returns {{ ecdsa: { publicKey, secretKey }, pq: { publicKey, secretKey, algorithm } }}
- */
-export function generateHybridKeyPair(pqAlgorithm = 'ML-DSA-65') {
-  const pqAlg = PQ_ALGORITHMS[pqAlgorithm];
-  if (!pqAlg) throw new HybridJWTError(
-    `Unknown PQ algorithm "${pqAlgorithm}". Supported: ${SUPPORTED_PQ_ALGORITHMS.join(', ')}`,
-    'UNKNOWN_ALGORITHM'
-  );
-  const ecdsaSecretKey = p256.utils.randomSecretKey();
-  const ecdsaPublicKey = p256.getPublicKey(ecdsaSecretKey, true);
-  const pqKp = pqAlg.impl.keygen();
-  return {
-    ecdsa: { publicKey: ecdsaPublicKey, secretKey: ecdsaSecretKey },
-    pq:    { publicKey: pqKp.publicKey, secretKey: pqKp.secretKey, algorithm: pqAlgorithm },
-  };
+export function generateCompositeKeyPair(algorithm = 'ML-DSA-65-ES256') {
+  const algParams = ALGORITHMS[algorithm];
+  if (!algParams) throw new HybridJWTError(`Unknown algorithm "${algorithm}"`, 'UNKNOWN_ALGORITHM');
+
+  // Generate ML-DSA key from 32-byte seed
+  const seed = randomBytes(32);
+  const mldsaKeyPair = algParams.mldsa.keygen(seed);
+
+  // Generate traditional key
+  const tradSecretKey = algParams.trad.utils.randomSecretKey();
+  const tradPublicKey = algParams.trad.getPublicKey(tradSecretKey, true); // true = compressed for ecdsa
+
+  // Composite Public Key: ML-DSA PK || Trad PK
+  const compositePublicKey = new Uint8Array(algParams.mldsaPkLen + algParams.tradPkLen);
+  compositePublicKey.set(mldsaKeyPair.publicKey, 0);
+  compositePublicKey.set(tradPublicKey, algParams.mldsaPkLen);
+
+  // Composite Private Key: ML-DSA Seed || Trad SK (seed is 32 bytes)
+  const compositePrivateKey = new Uint8Array(32 + algParams.tradSkLen);
+  compositePrivateKey.set(seed, 0);
+  compositePrivateKey.set(tradSecretKey, 32);
+
+  return { compositePublicKey, compositePrivateKey, algorithm };
 }
 
-/**
- * Export a key (Uint8Array) to a hex string for secure storage.
- */
-export function exportKey(key) {
-  if (!(key instanceof Uint8Array))
-    throw new HybridJWTError('exportKey expects Uint8Array', 'INVALID_KEY');
+export function exportCompositeKey(key) {
+  if (!(key instanceof Uint8Array)) throw new HybridJWTError('exportCompositeKey expects Uint8Array', 'INVALID_KEY');
   return Buffer.from(key).toString('hex');
 }
-
-/**
- * Import a hex string back to a key (Uint8Array).
- */
-export function importKey(hexString) {
-  if (typeof hexString !== 'string' || !/^[0-9a-f]+$/i.test(hexString))
-    throw new HybridJWTError('importKey expects a hex string', 'INVALID_KEY');
+export function importCompositeKey(hexString) {
+  if (typeof hexString !== 'string' || !/^[0-9a-f]+$/i.test(hexString)) throw new HybridJWTError('importCompositeKey expects a hex string', 'INVALID_KEY');
   return new Uint8Array(Buffer.from(hexString, 'hex'));
 }
 
@@ -152,301 +131,172 @@ export function importKey(hexString) {
 function parseDuration(d) {
   if (typeof d === 'number') return d;
   const m = String(d).match(/^(\d+(?:\.\d+)?)(s|m|h|d|w)$/);
-  if (!m) throw new HybridJWTError(
-    `Invalid duration "${d}". Use number (seconds) or "1h","7d","30m".`,
-    'INVALID_DURATION'
-  );
+  if (!m) throw new HybridJWTError(`Invalid duration "${d}". Use number (seconds) or "1h","7d","30m".`, 'INVALID_DURATION');
   return Math.floor(parseFloat(m[1]) * { s:1, m:60, h:3600, d:86400, w:604800 }[m[2]]);
 }
 
-// ── Core signing input ────────────────────────────────────────
-function buildSigningInput(header, claims) {
-  const he = encodeJSON(header);
-  const pe = encodeJSON(claims);
-  return { he, pe, bytes: enc.encode(`${he}.${pe}`) };
-}
+// ── signComposite() ──────────────────────────────────────────────
+export function signComposite(payload, compositePrivateKey, options = {}) {
+  if (typeof payload !== 'object' || payload === null) throw new HybridJWTError('Payload must be a non-null object', 'INVALID_PAYLOAD');
 
-// ── signHybrid() ──────────────────────────────────────────────
-/**
- * Sign a payload with BOTH ECDSA P-256 AND ML-DSA.
- * The resulting token carries both signatures.
- *
- * Old services: call verifyEcdsa(token, ecdsaPublicKey)
- * New services: call verifyPQ(token, pqPublicKey)
- * Bridge services: call verifyHybrid(token, ecdsaPublicKey, pqPublicKey)
- *
- * @param {object}           payload
- * @param {Uint8Array|string} ecdsaSecretKey  — 32-byte P-256 private key or hex
- * @param {Uint8Array|string} pqSecretKey     — ML-DSA secret key or hex
- * @param {object}           [options]
- * @param {'ML-DSA-44'|'ML-DSA-65'|'ML-DSA-87'|'SLH-DSA-SHA2-128s'} [options.pqAlgorithm='ML-DSA-65']
- * @param {number|string}    [options.expiresIn]
- * @param {number|string}    [options.notBefore]
- * @param {string}           [options.issuer]
- * @param {string}           [options.subject]
- * @param {string}           [options.audience]
- * @param {string}           [options.jwtId]
- * @returns {string}  — header.payload.combined_signature
- */
-export function signHybrid(payload, ecdsaSecretKey, pqSecretKey, options = {}) {
-  if (typeof payload !== 'object' || payload === null)
-    throw new HybridJWTError('Payload must be a non-null object', 'INVALID_PAYLOAD');
+  const algorithm = options.algorithm ?? 'ML-DSA-65-ES256';
+  const algParams = ALGORITHMS[algorithm];
+  if (!algParams) throw new HybridJWTError(`Unknown algorithm "${algorithm}"`, 'UNKNOWN_ALGORITHM');
 
-  const pqAlgorithm = options.pqAlgorithm ?? 'ML-DSA-65';
-  const pqAlg = PQ_ALGORITHMS[pqAlgorithm];
-  if (!pqAlg) throw new HybridJWTError(
-    `Unknown PQ algorithm "${pqAlgorithm}"`, 'UNKNOWN_ALGORITHM'
-  );
+  const sk = typeof compositePrivateKey === 'string' ? importCompositeKey(compositePrivateKey) : compositePrivateKey;
+  if (!(sk instanceof Uint8Array) || sk.length !== (32 + algParams.tradSkLen)) {
+    throw new HybridJWTError(`Composite private key must be ${32 + algParams.tradSkLen} bytes for ${algorithm}`, 'INVALID_KEY');
+  }
 
-  const ecSk = typeof ecdsaSecretKey === 'string' ? importKey(ecdsaSecretKey) : ecdsaSecretKey;
-  if (!(ecSk instanceof Uint8Array) || ecSk.length !== ECDSA_SK_LEN)
-    throw new HybridJWTError(`ECDSA secret key must be ${ECDSA_SK_LEN} bytes`, 'INVALID_KEY');
+  // Split private key
+  const mldsaSeed = sk.slice(0, 32);
+  const tradSk = sk.slice(32);
 
-  const pqSk = typeof pqSecretKey === 'string' ? importKey(pqSecretKey) : pqSecretKey;
-  if (!(pqSk instanceof Uint8Array) || pqSk.length !== pqAlg.skLen)
-    throw new HybridJWTError(
-      `PQ secret key must be ${pqAlg.skLen} bytes for ${pqAlgorithm}`, 'INVALID_KEY'
-    );
+  // Re-derive ML-DSA key
+  const mldsaKeyPair = algParams.mldsa.keygen(mldsaSeed);
 
   const now = Math.floor(Date.now() / 1000);
   const claims = { iat: now, ...payload };
-
   if (options.expiresIn !== undefined) claims.exp = now + parseDuration(options.expiresIn);
   if (options.notBefore !== undefined) claims.nbf = now + parseDuration(options.notBefore);
-  if (options.issuer)   claims.iss = options.issuer;
-  if (options.subject)  claims.sub = options.subject;
+  if (options.issuer) claims.iss = options.issuer;
+  if (options.subject) claims.sub = options.subject;
   if (options.audience) claims.aud = options.audience;
-  if (options.jwtId)    claims.jti = options.jwtId;
+  if (options.jwtId) claims.jti = options.jwtId;
 
-  const header = {
-    alg: `${pqAlgorithm}-ES256`,
-    typ: 'HYBRID-JWT',
-    ver: '1',
-  };
+  const header = { alg: algorithm, typ: 'JWT', ver: '2' };
+  const he = encodeJSON(header);
+  const pe = encodeJSON(claims);
+  const signingInput = enc.encode(`${he}.${pe}`);
 
-  const { he, pe, bytes } = buildSigningInput(header, claims);
+  // M' = Prefix || Label || 0x00 || PH(M)
+  const label = Buffer.from(algParams.labelHex, 'hex');
+  const phM = hashPreHash(algParams.hash, signingInput);
+  
+  const mPrime = new Uint8Array(PREFIX.length + label.length + 1 + phM.length);
+  mPrime.set(PREFIX, 0);
+  mPrime.set(label, PREFIX.length);
+  mPrime.set([0x00], PREFIX.length + label.length);
+  mPrime.set(phM, PREFIX.length + label.length + 1);
 
-  // ECDSA: sign SHA-256 of signing input
-  const ecdsaSig = p256.sign(sha256(bytes), ecSk);
+  // Base64URL encode M' per the IETF spec for JOSE
+  const encodedMPrime = enc.encode(toBase64Url(mPrime));
 
-  // ML-DSA: sign SHA-512 of signing input
-  const pqSig = pqAlg.impl.sign(sha512(bytes), pqSk);
+  // ML-DSA signature
+  const mldsaSig = algParams.mldsa.sign(encodedMPrime, mldsaKeyPair.secretKey, { context: label });
 
-  // Combine both signatures in one JSON envelope
-  const combined = encodeJSON({
-    e: Buffer.from(ecdsaSig).toString('hex'),
-    m: Buffer.from(pqSig).toString('hex'),
-  });
+  // Traditional signature
+  const tradSig = algParams.trad.sign(encodedMPrime, tradSk);
 
-  return `${he}.${pe}.${combined}`;
+  // Concatenate signatures
+  const compositeSignature = new Uint8Array(algParams.mldsaSigLen + tradSig.length);
+  compositeSignature.set(mldsaSig, 0);
+  compositeSignature.set(tradSig, algParams.mldsaSigLen);
+
+  return `${he}.${pe}.${toBase64Url(compositeSignature)}`;
 }
 
-// ── verifyHybrid() ────────────────────────────────────────────
-/**
- * Verify a hybrid token using BOTH ECDSA and ML-DSA signatures.
- * Both must be valid. Use during the transition period on services
- * that need to validate both classical and PQ halves.
- *
- * @param {string}           token
- * @param {Uint8Array|string} ecdsaPublicKey  — 33-byte compressed P-256 public key or hex
- * @param {Uint8Array|string} pqPublicKey     — ML-DSA public key or hex
- * @param {object}           [options]
- * @param {string}           [options.issuer]
- * @param {string}           [options.audience]
- * @param {string}           [options.subject]
- * @param {boolean}          [options.ignoreExpiry]
- * @param {number}           [options.clockTolerance]  seconds, default 0
- * @returns {{ header, payload }}
- */
-export function verifyHybrid(token, ecdsaPublicKey, pqPublicKey, options = {}) {
-  const { header, payload, he, pe, ecdsaSig, pqSig, pqAlgorithm } =
-    _decodeAndValidateStructure(token);
+// ── verifyComposite() ────────────────────────────────────────────
+export function verifyComposite(token, compositePublicKey, options = {}) {
+  if (typeof token !== 'string') throw new HybridInvalidTokenError('token must be a string');
 
-  const ecPk = typeof ecdsaPublicKey === 'string' ? importKey(ecdsaPublicKey) : ecdsaPublicKey;
-  if (!(ecPk instanceof Uint8Array) || ecPk.length !== ECDSA_PK_LEN)
-    throw new HybridJWTError(`ECDSA public key must be ${ECDSA_PK_LEN} bytes`, 'INVALID_KEY');
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new HybridInvalidTokenError('token must have 3 dot-separated parts');
+  
+  const [he, pe, se] = parts;
 
-  const pqAlg = PQ_ALGORITHMS[pqAlgorithm];
-  const pqPk = typeof pqPublicKey === 'string' ? importKey(pqPublicKey) : pqPublicKey;
-  if (!(pqPk instanceof Uint8Array) || pqPk.length !== pqAlg.pkLen)
-    throw new HybridJWTError(
-      `PQ public key must be ${pqAlg.pkLen} bytes for ${pqAlgorithm}`, 'INVALID_KEY'
-    );
+  let header;
+  try { header = decodeJSON(he); } catch { throw new HybridInvalidTokenError('header is not valid base64url JSON'); }
+  if (!ALGORITHMS[header.alg]) throw new HybridInvalidTokenError(`unrecognized algorithm "${header.alg}"`);
+  
+  const algorithm = header.alg;
+  const algParams = ALGORITHMS[algorithm];
 
-  const signingBytes = enc.encode(`${he}.${pe}`);
+  const pk = typeof compositePublicKey === 'string' ? importCompositeKey(compositePublicKey) : compositePublicKey;
+  if (!(pk instanceof Uint8Array) || pk.length !== (algParams.mldsaPkLen + algParams.tradPkLen)) {
+    throw new HybridJWTError(`Composite public key must be ${algParams.mldsaPkLen + algParams.tradPkLen} bytes for ${algorithm}`, 'INVALID_KEY');
+  }
 
-  // Verify ECDSA
-  let ecdsaOk = false;
-  try { ecdsaOk = p256.verify(ecdsaSig, sha256(signingBytes), ecPk); }
-  catch { ecdsaOk = false; }
-  if (!ecdsaOk) throw new HybridSignatureError('ECDSA');
+  // Split public key
+  const mldsaPk = pk.slice(0, algParams.mldsaPkLen);
+  const tradPk = pk.slice(algParams.mldsaPkLen);
+
+  const sigBytes = fromBase64Url(se);
+  const tradSigLen = sigBytes.length - algParams.mldsaSigLen;
+  if (tradSigLen <= 0) throw new HybridInvalidTokenError('signature too short');
+
+  const mldsaSig = sigBytes.slice(0, algParams.mldsaSigLen);
+  const tradSigBytes = sigBytes.slice(algParams.mldsaSigLen);
+
+  let payload;
+  try { payload = decodeJSON(pe); } catch { throw new HybridInvalidTokenError('payload is not valid base64url JSON'); }
+
+  // M' = Prefix || Label || 0x00 || PH(M)
+  const signingInput = enc.encode(`${he}.${pe}`);
+  const label = Buffer.from(algParams.labelHex, 'hex');
+  const phM = hashPreHash(algParams.hash, signingInput);
+  
+  const mPrime = new Uint8Array(PREFIX.length + label.length + 1 + phM.length);
+  mPrime.set(PREFIX, 0);
+  mPrime.set(label, PREFIX.length);
+  mPrime.set([0x00], PREFIX.length + label.length);
+  mPrime.set(phM, PREFIX.length + label.length + 1);
+
+  const encodedMPrime = enc.encode(toBase64Url(mPrime));
 
   // Verify ML-DSA
   let pqOk = false;
-  try { pqOk = pqAlg.impl.verify(pqSig, sha512(signingBytes), pqPk); }
-  catch { pqOk = false; }
+  try { pqOk = algParams.mldsa.verify(mldsaSig, encodedMPrime, mldsaPk, { context: label }); } catch { pqOk = false; }
   if (!pqOk) throw new HybridSignatureError('ML-DSA');
 
-  _validateClaims(payload, options);
-  return { header, payload };
-}
-
-// ── verifyPQ() ────────────────────────────────────────────────
-/**
- * Verify only the ML-DSA (post-quantum) signature.
- * Use on new services that only care about quantum-safe verification.
- *
- * @param {string}           token
- * @param {Uint8Array|string} pqPublicKey
- * @param {object}           [options]
- * @returns {{ header, payload }}
- */
-export function verifyPQ(token, pqPublicKey, options = {}) {
-  const { header, payload, he, pe, pqSig, pqAlgorithm } =
-    _decodeAndValidateStructure(token);
-
-  const pqAlg = PQ_ALGORITHMS[pqAlgorithm];
-  const pqPk = typeof pqPublicKey === 'string' ? importKey(pqPublicKey) : pqPublicKey;
-  if (!(pqPk instanceof Uint8Array) || pqPk.length !== pqAlg.pkLen)
-    throw new HybridJWTError(
-      `PQ public key must be ${pqAlg.pkLen} bytes for ${pqAlgorithm}`, 'INVALID_KEY'
-    );
-
-  const signingBytes = enc.encode(`${he}.${pe}`);
-  let pqOk = false;
-  try { pqOk = pqAlg.impl.verify(pqSig, sha512(signingBytes), pqPk); }
-  catch { pqOk = false; }
-  if (!pqOk) throw new HybridSignatureError('ML-DSA');
-
-  _validateClaims(payload, options);
-  return { header, payload };
-}
-
-// ── verifyEcdsa() ─────────────────────────────────────────────
-/**
- * Verify only the ECDSA P-256 signature — the classical (legacy) path.
- * Use on existing services that have not yet been upgraded to ML-DSA.
- * During Phase 1 migration, old services call this; new services call verifyPQ.
- *
- * @param {string}           token
- * @param {Uint8Array|string} ecdsaPublicKey  — 33-byte compressed P-256 public key or hex
- * @param {object}           [options]
- * @returns {{ header, payload }}
- */
-export function verifyEcdsa(token, ecdsaPublicKey, options = {}) {
-  const { header, payload, he, pe, ecdsaSig } =
-    _decodeAndValidateStructure(token);
-
-  const ecPk = typeof ecdsaPublicKey === 'string' ? importKey(ecdsaPublicKey) : ecdsaPublicKey;
-  if (!(ecPk instanceof Uint8Array) || ecPk.length !== ECDSA_PK_LEN)
-    throw new HybridJWTError(`ECDSA public key must be ${ECDSA_PK_LEN} bytes`, 'INVALID_KEY');
-
-  const signingBytes = enc.encode(`${he}.${pe}`);
-  let ecdsaOk = false;
-  try { ecdsaOk = p256.verify(ecdsaSig, sha256(signingBytes), ecPk); }
-  catch { ecdsaOk = false; }
-  if (!ecdsaOk) throw new HybridSignatureError('ECDSA');
+  // Verify Traditional
+  let tradOk = false;
+  try {
+    if (algParams.tradType === 'ecdsa') {
+      tradOk = algParams.trad.verify(tradSigBytes, encodedMPrime, tradPk);
+    } else {
+      tradOk = algParams.trad.verify(tradSigBytes, encodedMPrime, tradPk);
+    }
+  } catch { tradOk = false; }
+  if (!tradOk) throw new HybridSignatureError('Traditional');
 
   _validateClaims(payload, options);
   return { header, payload };
 }
 
 // ── decode() — no verification ─────────────────────────────────
-/**
- * Decode a hybrid token WITHOUT verifying either signature.
- * For inspection only — never use the payload for authorization.
- */
 export function decode(token) {
-  if (typeof token !== 'string')
-    throw new HybridInvalidTokenError('token must be a string');
+  if (typeof token !== 'string') throw new HybridInvalidTokenError('token must be a string');
   const parts = token.split('.');
-  if (parts.length !== 3)
-    throw new HybridInvalidTokenError('token must have 3 dot-separated parts');
+  if (parts.length !== 3) throw new HybridInvalidTokenError('token must have 3 dot-separated parts');
   let header, payload;
   try { header = decodeJSON(parts[0]); } catch { throw new HybridInvalidTokenError('header is not valid base64url JSON'); }
   try { payload = decodeJSON(parts[1]); } catch { throw new HybridInvalidTokenError('payload is not valid base64url JSON'); }
-  let combined;
-  try { combined = decodeJSON(parts[2]); } catch { throw new HybridInvalidTokenError('signature segment is not valid base64url JSON'); }
   return {
     header,
     payload,
-    ecdsaSignature: combined.e ? new Uint8Array(Buffer.from(combined.e, 'hex')) : null,
-    pqSignature:    combined.m ? new Uint8Array(Buffer.from(combined.m, 'hex')) : null,
+    signature: fromBase64Url(parts[2])
   };
 }
 
 // ── Internal helpers ──────────────────────────────────────────
-
-function _decodeAndValidateStructure(token) {
-  if (typeof token !== 'string')
-    throw new HybridInvalidTokenError('token must be a string');
-
-  const parts = token.split('.');
-  if (parts.length !== 3)
-    throw new HybridInvalidTokenError('token must have 3 dot-separated parts');
-
-  const [he, pe, se] = parts;
-
-  let header;
-  try { header = decodeJSON(he); }
-  catch { throw new HybridInvalidTokenError('header is not valid base64url JSON'); }
-
-  if (header.typ !== 'HYBRID-JWT')
-    throw new HybridInvalidTokenError(`expected typ "HYBRID-JWT", got "${header.typ}"`);
-
-  // Parse alg: "ML-DSA-65-ES256"
-  const algMatch = (header.alg ?? '').match(/^(.+)-ES256$/);
-  if (!algMatch)
-    throw new HybridInvalidTokenError(`unrecognized algorithm "${header.alg}"`);
-
-  const pqAlgorithm = algMatch[1];
-  if (!PQ_ALGORITHMS[pqAlgorithm])
-    throw new HybridInvalidTokenError(`unrecognized PQ algorithm "${pqAlgorithm}"`);
-
-  let payload;
-  try { payload = decodeJSON(pe); }
-  catch { throw new HybridInvalidTokenError('payload is not valid base64url JSON'); }
-
-  let combined;
-  try { combined = decodeJSON(se); }
-  catch { throw new HybridInvalidTokenError('signature segment is not valid base64url JSON'); }
-
-  if (!combined.e || !combined.m)
-    throw new HybridInvalidTokenError('signature segment missing ECDSA (e) or ML-DSA (m) field');
-
-  const ecdsaSig = new Uint8Array(Buffer.from(combined.e, 'hex'));
-  const pqSig    = new Uint8Array(Buffer.from(combined.m, 'hex'));
-
-  if (ecdsaSig.length !== ECDSA_SIG_LEN)
-    throw new HybridInvalidTokenError(`ECDSA sig must be ${ECDSA_SIG_LEN} bytes, got ${ecdsaSig.length}`);
-
-  return { header, payload, he, pe, ecdsaSig, pqSig, pqAlgorithm };
-}
-
 function _validateClaims(payload, options) {
   const now = Math.floor(Date.now() / 1000);
   const tol = options.clockTolerance ?? 0;
 
   if (!options.ignoreExpiry && payload.exp !== undefined)
-    if (now > payload.exp + tol)
-      throw new HybridTokenExpiredError(payload.exp);
+    if (now > payload.exp + tol) throw new HybridTokenExpiredError(payload.exp);
 
   if (payload.nbf !== undefined)
     if (now < payload.nbf - tol)
-      throw new HybridJWTError(
-        `Token not valid before ${new Date(payload.nbf * 1000).toISOString()}`,
-        'TOKEN_NOT_YET_VALID'
-      );
+      throw new HybridJWTError(`Token not valid before ${new Date(payload.nbf * 1000).toISOString()}`, 'TOKEN_NOT_YET_VALID');
 
   if (options.issuer && payload.iss !== options.issuer)
-    throw new HybridInvalidTokenError(
-      `issuer mismatch: expected "${options.issuer}", got "${payload.iss}"`
-    );
+    throw new HybridInvalidTokenError(`issuer mismatch: expected "${options.issuer}", got "${payload.iss}"`);
 
   if (options.audience) {
     const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (!aud.includes(options.audience))
-      throw new HybridInvalidTokenError('audience mismatch');
+    if (!aud.includes(options.audience)) throw new HybridInvalidTokenError('audience mismatch');
   }
 
   if (options.subject && payload.sub !== options.subject)
